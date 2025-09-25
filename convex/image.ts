@@ -12,7 +12,7 @@ export const ImageGen = internalAction({
         style: v.string(),
     },
     handler: async (ctx, args): Promise<Id<"images"> | ConvexError<string>> => {
-        console.log(`[ImageGen] Image URL: ${args.imageUrl}`);
+        console.log(`[ImageGen] Starting image generation for style: ${args.style}`);
 
         if (!process.env.OPENAI_API_KEY) {
             throw new ConvexError("API key not configured");
@@ -24,13 +24,24 @@ export const ImageGen = internalAction({
         });
 
         try {
-            // Initialize OpenAI with API key
+            // Initialize OpenAI with API key and timeout
             const openai = new OpenAI({
                 apiKey: process.env.OPENAI_API_KEY,
+                timeout: 60000, // 60 second timeout
             });
 
-            // Create the prompt for the specific style transformation
-            const prompt = `You are a world-class professional artist specializing in ${args.style} transformations.
+            // Optimized prompt with better instructions for faster processing
+            const stylePrompts = {
+                "simpsons": "Transform into Simpsons style: yellow skin, large eyes, overbite, spiky hair, simple shapes",
+                "studio-ghibli": "Transform into Studio Ghibli style: soft colors, detailed backgrounds, expressive eyes, flowing hair",
+                "family-guy": "Transform into Family Guy style: simple shapes, bold outlines, exaggerated features, flat colors",
+                "disney": "Transform into Disney style: clean lines, vibrant colors, expressive features, classic animation look",
+                "anime": "Transform into anime style: large eyes, detailed hair, expressive features, clean lineart",
+                "comic-book": "Transform into comic book style: bold outlines, high contrast, dramatic shadows, graphic style",
+                "south-park": "Transform into South Park style: simple geometric shapes, flat colors, minimal details"
+            };
+
+            const basePrompt = `You are a world-class professional artist specializing in cartoon transformations.
                 
             Your task is to transform the input photograph into a high-quality ${args.style} artwork with these specific requirements:
                     
@@ -43,49 +54,80 @@ export const ImageGen = internalAction({
             7. Use the characteristic ${args.style} aesthetic while preserving the person's identity
             8. Create a polished, professional result that is instantly recognizable as the same person`;
 
-            // Fetch the image data
-            const imageResponse = await fetch(args.imageUrl);
-            const imageBuffer = await imageResponse.arrayBuffer();
+            const styleSpecificPrompt = stylePrompts[args.style as keyof typeof stylePrompts] || "";
+            const prompt = `${basePrompt}\n\nStyle-specific instructions: ${styleSpecificPrompt}`;
 
-            // Convert to File object with proper metadata that OpenAI expects
-            const file = new File(
-                [new Uint8Array(imageBuffer)],
-                "image.png",
-                { type: "image/png" }
-            );
+            // Fetch the image data with timeout and error handling
+            const controller = new AbortController();
+            const timeoutId = setTimeout(() => controller.abort(), 30000); // 30 second timeout for fetch
 
-            // Call OpenAI's image generation API with the source image
-            const response = await openai.images.edit({
-                model: "gpt-image-1",
-                image: [file],  // Pass an array containing the File object
-                prompt: prompt,
-            });
+            try {
+                const imageResponse = await fetch(args.imageUrl, {
+                    signal: controller.signal,
+                    headers: {
+                        'User-Agent': 'Paperbag-App/1.0',
+                    }
+                });
+                clearTimeout(timeoutId);
 
-            // Get the base64 image data from response
-            const imageData = response.data?.[0].b64_json;
-            if (!imageData) {
-                if (imageRecord) {
-                    await ctx.runMutation(internal.image.updateImageStatus, {
-                        imageId: imageRecord._id,
-                        status: "error",
-                        errorMessage: "No image data found in response"
-                    });
+                if (!imageResponse.ok) {
+                    throw new Error(`Failed to fetch image: ${imageResponse.status} ${imageResponse.statusText}`);
                 }
-                return new ConvexError("No image data found in response");
+
+                const imageBuffer = await imageResponse.arrayBuffer();
+
+                // Validate image size (max 10MB)
+                if (imageBuffer.byteLength > 10 * 1024 * 1024) {
+                    throw new Error("Image too large. Maximum size is 10MB.");
+                }
+
+                // Convert to File object with proper metadata that OpenAI expects
+                const file = new File(
+                    [new Uint8Array(imageBuffer)],
+                    "image.png",
+                    { type: "image/png" }
+                );
+
+                // Call OpenAI's image generation API with the source image
+                const response = await openai.images.edit({
+                    model: "gpt-image-1",
+                    image: [file],  // Pass an array containing the File object
+                    prompt: prompt,
+                    n: 1, // Only generate one image for faster processing
+                    size: "1024x1024", // Standard size for better performance
+                });
+
+                // Get the base64 image data from response
+                const imageData = response.data?.[0].b64_json;
+                if (!imageData) {
+                    if (imageRecord) {
+                        await ctx.runMutation(internal.image.updateImageStatus, {
+                            imageId: imageRecord._id,
+                            status: "error",
+                            errorMessage: "No image data found in response"
+                        });
+                    }
+                    return new ConvexError("No image data found in response");
+                }
+
+                // Format the image data with proper data URL prefix
+                const processedImageData = `data:image/png;base64,${imageData}`;
+
+                // Call a mutation to store the image in the database
+                const imageId: Id<"images"> = await ctx.runMutation(internal.image.storeCartoonImage, {
+                    userId: args.userId,
+                    originalStorageId: args.imageUrl,
+                    originalImageUrl: args.imageUrl,
+                    cartoonImageData: processedImageData,
+                });
+
+                console.log(`[ImageGen] Successfully generated image for style: ${args.style}`);
+                return imageId;
+
+            } catch (fetchError) {
+                clearTimeout(timeoutId);
+                throw fetchError;
             }
-
-            // Format the image data with proper data URL prefix
-            const processedImageData = `data:image/png;base64,${imageData}`;
-
-            // Call a mutation to store the image in the database
-            const imageId: Id<"images"> = await ctx.runMutation(internal.image.storeCartoonImage, {
-                userId: args.userId,
-                originalStorageId: args.imageUrl,
-                originalImageUrl: args.imageUrl,
-                cartoonImageData: processedImageData,
-            });
-
-            return imageId;
 
         } catch (error: any) {
             console.error("[ImageGen] Error generating content:", error);

@@ -1,12 +1,15 @@
 import { SignInButton, useAuth, useUser } from "@clerk/clerk-react"
 import { useAction, useMutation, useQuery } from "convex/react"
 import { Download, Sparkles, Upload } from "lucide-react"
-import React, { DragEvent, useEffect, useRef, useState } from "react"
+import React, { DragEvent, useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { api } from "../../convex/_generated/api"
 import { Credits } from "./credits"
 import { Button } from "./ui/button"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "./ui/select"
 import { useToast } from "./ui/toast"
+import { validateImageFile, compressImage, createThumbnail, formatFileSize, debounce } from "../lib/imageUtils"
+import { ErrorHandler, PaperbagError, ErrorType, withRetry } from "../lib/errorHandling"
+import { ImageProcessingLoader, useLoadingState, RetryButton } from "./ui/loading"
 
 export default function CartoonHero() {
   const { isSignedIn, userId } = useAuth()
@@ -14,10 +17,12 @@ export default function CartoonHero() {
 
   const [image, setImage] = useState<string | null>(null)
   const [cartoonImage, setCartoonImage] = useState<string | null>(null)
-  const [isProcessing, setIsProcessing] = useState(false)
   const [imageId, setImageId] = useState<string | null>(null)
-  const [uploadError, setUploadError] = useState<string | null>(null)
   const [cartoonStyle, setCartoonStyle] = useState<string>("simpsons")
+  
+  // Enhanced loading and error state management
+  const { loadingState, setLoading, setProgress, setError, clearError, reset } = useLoadingState()
+  const errorHandler = ErrorHandler.getInstance()
 
   // Query to check if user has any processing images
   const userProcessingImages = useQuery(api.files.getUserProcessingImages, 
@@ -134,19 +139,50 @@ export default function CartoonHero() {
   
   // We don't need the handleUploadCartoonImage function anymore since we're not storing base64 data in the database
 
-  const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+  // Memoized validation function with better error handling
+  const validateUserAndCredits = useCallback(() => {
+    if (!isSignedIn) {
+      const error = new PaperbagError(
+        ErrorType.AUTHENTICATION,
+        "Please sign in to generate cartoon images"
+      )
+      errorHandler.handleError(error)
+      return false
+    }
+    
+    if (userCreditsStatus && userCreditsStatus.remainingCredits <= 0) {
+      const error = new PaperbagError(
+        ErrorType.AUTHORIZATION,
+        "Please purchase more credits to continue"
+      )
+      errorHandler.handleError(error)
+      return false
+    }
+
+    if (loadingState.isLoading) {
+      const error = new PaperbagError(
+        ErrorType.PROCESSING,
+        "Please wait for the current image to finish processing"
+      )
+      errorHandler.handleError(error)
+      return false
+    }
+
+    return true
+  }, [isSignedIn, userCreditsStatus, loadingState.isLoading, errorHandler])
+
+  // Optimized file handling with compression and validation
+  const handleFileChange = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0]
     if (!file) return
     
-    // Check if user is authenticated
-    if (!isSignedIn) {
-      setUploadError("Please sign in to generate cartoon images")
-      return
-    }
-    
-    // Check if user has enough credits
-    if (userCreditsStatus && userCreditsStatus.remainingCredits <= 0) {
-      setUploadError("Please purchase more credits to continue.")
+    // Validate user and credits first
+    if (!validateUserAndCredits()) return
+
+    // Validate image file
+    const validation = validateImageFile(file)
+    if (!validation.isValid) {
+      setUploadError(validation.error!)
       return
     }
 
@@ -154,14 +190,14 @@ export default function CartoonHero() {
     setUploadError(null)
 
     try {
-      // Display the image preview locally
-      const reader = new FileReader()
-      reader.onload = async (event) => {
-        const imageData = event.target?.result as string
-        setImage(imageData)
-        setCartoonImage(null)
-      }
-      reader.readAsDataURL(file)
+      // Create thumbnail for immediate preview
+      const thumbnail = await createThumbnail(file, 400)
+      setImage(thumbnail)
+      setCartoonImage(null)
+
+      // Compress image for upload (reduces processing time)
+      const compressedFile = await compressImage(file, 0.85)
+      console.log(`Compressed image from ${formatFileSize(file.size)} to ${formatFileSize(compressedFile.size)}`)
 
       // Upload to Convex
       const uploadUrl = await generateUploadUrl()
@@ -169,9 +205,9 @@ export default function CartoonHero() {
       const result = await fetch(uploadUrl, {
         method: "POST",
         headers: {
-          "Content-Type": file.type,
+          "Content-Type": compressedFile.type,
         },
-        body: file,
+        body: compressedFile,
       })
 
       if (!result.ok) {
@@ -189,11 +225,9 @@ export default function CartoonHero() {
 
         setImageId(storageId)
         
-        // Keep the uploaded image visible during processing
-        
-        // Show toast notification with dashboard button that stays open until closed
+        // Show optimized toast notification
         addToast(
-          <div className="space-y-2 ">
+          <div className="space-y-2">
             <p>Your image is being processed.</p>
             <p>You can safely refresh or come back to it later in your dashboard.</p>
             <Button 
@@ -204,7 +238,7 @@ export default function CartoonHero() {
             </Button>
           </div>, 
           "info", 
-          0 // 0 means it won't auto-close
+          0
         )
         
         // Automatically start cartoonifying the image
@@ -216,7 +250,7 @@ export default function CartoonHero() {
     } finally {
       setIsProcessing(false)
     }
-  }
+  }, [validateUserAndCredits, generateUploadUrl, saveUploadedImage, cartoonifyImage, cartoonStyle, userId, addToast])
 
 
 
