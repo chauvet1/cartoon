@@ -1,5 +1,5 @@
-import React, { createContext, useContext, useState, useEffect } from 'react';
-import { X } from 'lucide-react';
+import React, { createContext, useContext, useState, useEffect, useCallback, useMemo } from 'react';
+import { X, CheckCircle, AlertCircle, Info, AlertTriangle } from 'lucide-react';
 
 // Toast types
 export type ToastType = 'success' | 'error' | 'info' | 'warning';
@@ -14,6 +14,10 @@ export interface Toast {
 interface ToastContextType {
   toasts: Toast[];
   addToast: (message: string | React.ReactNode, type: ToastType, duration?: number) => void;
+  addSuccessToast: (message: string, duration?: number) => void;
+  addErrorToast: (message: string, duration?: number) => void;
+  addWarningToast: (message: string, duration?: number) => void;
+  addInfoToast: (message: string, duration?: number) => void;
   removeToast: (id: string) => void;
 }
 
@@ -30,17 +34,71 @@ export const useToast = () => {
 export const ToastProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const [toasts, setToasts] = useState<Toast[]>([]);
 
-  const addToast = (message: string | React.ReactNode, type: ToastType = 'info', duration = 5000) => {
+  const addToast = useCallback((message: string | React.ReactNode, type: ToastType = 'info', duration = 5000) => {
     const id = Math.random().toString(36).substring(2, 9);
     setToasts((prev) => [...prev, { id, message, type, duration }]);
-  };
+  }, []);
 
-  const removeToast = (id: string) => {
+  const addSuccessToast = useCallback((message: string, duration?: number) => {
+    addToast(
+      <div className="flex items-center space-x-2">
+        <CheckCircle className="h-5 w-5 text-green-600" />
+        <span>{message}</span>
+      </div>,
+      'success',
+      duration
+    );
+  }, [addToast]);
+
+  const addErrorToast = useCallback((message: string, duration?: number) => {
+    addToast(
+      <div className="flex items-center space-x-2">
+        <AlertCircle className="h-5 w-5 text-red-600" />
+        <span>{message}</span>
+      </div>,
+      'error',
+      duration
+    );
+  }, [addToast]);
+
+  const addWarningToast = useCallback((message: string, duration?: number) => {
+    addToast(
+      <div className="flex items-center space-x-2">
+        <AlertTriangle className="h-5 w-5 text-yellow-600" />
+        <span>{message}</span>
+      </div>,
+      'warning',
+      duration
+    );
+  }, [addToast]);
+
+  const addInfoToast = useCallback((message: string, duration?: number) => {
+    addToast(
+      <div className="flex items-center space-x-2">
+        <Info className="h-5 w-5 text-blue-600" />
+        <span>{message}</span>
+      </div>,
+      'info',
+      duration
+    );
+  }, [addToast]);
+
+  const removeToast = useCallback((id: string) => {
     setToasts((prev) => prev.filter((toast) => toast.id !== id));
-  };
+  }, []);
+
+  const contextValue = useMemo(() => ({
+    toasts,
+    addToast,
+    addSuccessToast,
+    addErrorToast,
+    addWarningToast,
+    addInfoToast,
+    removeToast,
+  }), [toasts, addToast, addSuccessToast, addErrorToast, addWarningToast, addInfoToast, removeToast]);
 
   return (
-    <ToastContext.Provider value={{ toasts, addToast, removeToast }}>
+    <ToastContext.Provider value={contextValue}>
       {children}
       <ToastContainer toasts={toasts} removeToast={removeToast} />
     </ToastContext.Provider>

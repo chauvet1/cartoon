@@ -81,17 +81,37 @@ export const getImageUrl = query({
   },
 });
 
-// Get all images for a user
+// Get all images for a user with pagination and optimization
 export const getUserImages = query({
-  args: { userId: v.string() },
+  args: { 
+    userId: v.string(),
+    limit: v.optional(v.number()),
+    cursor: v.optional(v.string())
+  },
   handler: async (ctx, args) => {
-    const images = await ctx.db
+    const limit = args.limit || 20; // Default limit for performance
+    
+    let query = ctx.db
       .query("images")
       .withIndex("by_user", (q) => q.eq("userId", args.userId))
-      .order("desc")
-      .collect();
+      .order("desc");
 
-    return images;
+    // Add pagination if cursor is provided
+    if (args.cursor) {
+      query = query.filter((q) => q.lt(q.field("createdAt"), parseInt(args.cursor!)));
+    }
+
+    const images = await query.take(limit);
+    
+    // Return pagination info
+    const hasMore = images.length === limit;
+    const nextCursor = hasMore ? images[images.length - 1].createdAt.toString() : null;
+
+    return {
+      images,
+      hasMore,
+      nextCursor
+    };
   },
 });
 
